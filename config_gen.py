@@ -42,6 +42,9 @@ def main():
     parser.add_argument("--out-of-tree", action="store_true", help="Build autotools projects out-of-tree. This is a no-op for other project types.")
     parser.add_argument("--qt-version", choices=["4", "5"], default="5", help="Use the given Qt version for qmake. (Default: 5)")
     parser.add_argument("-e", "--preserve-environment", action="store_true", help="Pass environment variables to build processes.")
+    parser.add_argument("-s", "--use_stdout",  action="store_true", help="Capture standard output from the buildsystem and parse that for flags ")
+    parser.add_argument("-b", "--beginswith",  default="", help="If using stdout, only use the lines from stdout that starts with beginswith")
+
     parser.add_argument("PROJECT_DIR", help="The root directory of the project.")
     args = vars(parser.parse_args())
     project_dir = os.path.abspath(args["PROJECT_DIR"])
@@ -59,6 +62,7 @@ def main():
         print("ERROR: Could not find clang at '{}'. Please make sure it is installed and is either in your path, or specified with --compiler.".format(cc))
         return 1
 
+
     try:
         h, t = os.path.split(args["compiler"] or "clang")
         cxx = os.path.join(h, t.replace("clang", "clang++"))
@@ -66,6 +70,14 @@ def main():
     except subprocess.CalledProcessError:
         print("ERROR: Could not find clang++ at '{}'. Please make sure it is installed and specified appropriately.".format(cxx))
         return 1
+
+    use_stdout = args["use_stdout"]
+    if(use_stdout and not args["force"]):
+        print("WARNING: This will try to parse the output from whatever make command and might build the program, continue? [y/N]")
+        response = sys.stdin.readline().strip().lower()
+        if(response != "y" and response != "yes"):
+            return 1
+
 
     # sanity check - remove this after we add Windows support
     if(sys.platform.startswith("win32")):
@@ -91,10 +103,14 @@ def main():
     args["make_flags"] = default_make_flags if args["make_flags"] is None else shlex.split(args["make_flags"])
     force_lang = args.pop("language")
     output_format = args.pop("format")
+
+    string_begins_with = args["beginswith"]
+
     del args["compiler"]
     del args["force"]
     del args["output"]
     del args["PROJECT_DIR"]
+    del args["beginswith"]
 
     generate_conf = {
         "ycm": generate_ycm_conf,
@@ -106,8 +122,18 @@ def main():
         with tempfile.NamedTemporaryFile(mode="rw") as cxx_build_log:
             # perform the actual compilation of flags
             fake_build(project_dir, c_build_log.name, cxx_build_log.name, **args)
-            (c_count, c_skip, c_flags) = parse_flags(c_build_log)
-            (cxx_count, cxx_skip, cxx_flags) = parse_flags(cxx_build_log)
+            if(use_stdout):
+                stdout_build_log = []
+                for line in c_build_log:
+                    if line.startswith( string_begins_with ):
+                        stdout_build_log.append(line)
+                (c_count, c_skip, c_flags) = parse_flags(stdout_build_log)
+                cxx_count = 0
+                cxx_skip = 0
+                cxx_flags = 0
+            else:
+                (c_count, c_skip, c_flags) = parse_flags(c_build_log)
+                (cxx_count, cxx_skip, cxx_flags) = parse_flags(cxx_build_log)
 
             print("Collected {} relevant entries for C compilation ({} discarded).".format(c_count, c_skip))
             print("Collected {} relevant entries for C++ compilation ({} discarded).".format(cxx_count, cxx_skip))
@@ -140,7 +166,7 @@ def main():
             print("Created {} config file with {} {} flags".format(output_format.upper(), len(flags), lang.upper()))
 
 
-def fake_build(project_dir, c_build_log_path, cxx_build_log_path, verbose, make_cmd, build_system, cc, cxx, out_of_tree, configure_opts, make_flags, preserve_environment, qt_version):
+def fake_build(project_dir, c_build_log_path, cxx_build_log_path, verbose, make_cmd, build_system, cc, cxx, out_of_tree, configure_opts, make_flags, preserve_environment, qt_version, use_stdout):
     '''Builds the project using the fake toolchain, to collect the compiler flags.
 
     project_dir: the directory containing the source files
@@ -163,9 +189,14 @@ def fake_build(project_dir, c_build_log_path, cxx_build_log_path, verbose, make_
     # environment variables and arguments for build process
     started = time.time()
     FNULL = open(os.devnull, "w")
+
+    if(use_stdout):
+        stdout_file = open(c_build_log_path, 'w')
+    else:
+        stdout_file = FNULL
     proc_opts = {} if verbose else {
         "stdin": FNULL,
-        "stdout": FNULL,
+        "stdout": stdout_file,
         "stderr": FNULL
     }
     proc_opts["cwd"] = project_dir
